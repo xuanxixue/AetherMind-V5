@@ -1,0 +1,6 @@
+# PMNN 文本模型 — 最低依赖（云端 ModelScope PAI-DSW 预装 torch，无需重装）
+# torch>=2.0        # 镜像已预装，勿 pip 覆盖（CUDA 版本以镜像为准）
+numpy>=1.24
+tokenizers>=0.15
+# 可选：仅 plot_train.py 画图用
+matplotlib>=3.7
