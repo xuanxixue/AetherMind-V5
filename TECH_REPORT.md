@@ -1,264 +1,272 @@
-# PMNN 文本生成模型 · 技术评估报告
+<!-- yaml front-matter for ModelScope / Hugging Face indexing -->
+---
+title: PMNN Text Generation Model — Technical Evaluation Report
+version: v1.0 (Open-Source Release)
+date: 2026-09
+domain: nlp
+frameworks: PyTorch
+tags:
+- Technical Report
+- Evaluation
+- Physics Model
+- Text Generation
+language:
+- en
+---
 
-> 版本：v1.0（开源版）
-> 日期：2026-09
-> 范围：架构评估、训练设置、全部测试方向与结果、归因结论
+# PMNN Text Generation Model · Technical Evaluation Report
+
+> **Version**: v1.0 (Open-Source Release) · **Date**: 2026-09
+> **Scope**: Architecture assessment, training setup, complete testing directions & results, attribution conclusions
+
+<p align="center">
+  <a href="README.md"><b>English</b></a> &nbsp;|&nbsp;
+  <a href="README_CN.md">简体中文</a>
+</p>
 
 ---
 
-## 1. 概述
+## Table of Contents
 
-PMNN（物理矩阵神经网络）是一套用**物理动力学替代 Transformer 统计注意力**的通用底层架构。
-本报告记录从架构落地、训练到多轮评测的完整过程，重点是**客观的测试结果**——
-包括哪些方向有效、哪些方向无效，以及无效背后的根因。
-
-**核心结论（先行）：**
-- 架构的**前向/反向/生成链路全部可用**，无结构性阻断；
-- 评测暴露的全部问题（复读、答非所问、多轮崩坏）归因于**训练数据不足 + 训练步数不足 + 数据质量有污染**，即**欠拟合**，而非架构错误；
-- 知识图谱推理期注入**无效甚至有害**，正确用法是转成训练语料而非推理期 RAG。
+- [1. Executive Summary](#1-executive-summary)
+- [2. Hardware & Training Constraints](#2-hardware--training-constraints)
+- [3. Data Scale & Parameter/Token Ratio](#3-data-scale--parametertoken-ratio)
+- [4. Evaluation Metrics (step 5000 checkpoint)](#4-evaluation-metrics-step-5000-checkpoint)
+- [5. Test Directions & Results](#5-test-directions--results)
+- [6. Architecture-Level Assessment](#6-architecture-level-assessment)
+- [7. Attribution Summary](#7-attribution-summary)
+- [8. Recommended Next Steps (Ranked by ROI)](#8-recommended-next-steps-ranked-by-roi)
+- [9. Reproducibility Entry Points](#9-reproducibility-entry-points)
+- [10. License & Open-Source Statement](#10-license--open-source-statement)
 
 ---
 
-## 2. 硬件与训练约束（为什么"小"）
+## 1. Executive Summary
 
-本项目分两套环境，**训练在云端、测试与修复在本地**：
+PMNN (Physics Matrix Neural Network) is a general-purpose substrate architecture that replaces Transformer's statistical attention with **physical dynamics**. This report documents the complete lifecycle — from architecture implementation and training through multiple evaluation rounds — with the emphasis on **objective test results**, including which directions worked, which did not, and the root causes behind the failures.
 
-### 2.1 训练环境（魔塔社区云端）
+**Headline Conclusions (upfront)**:
 
-| 资源 | 规格 |
+1. The architecture's **forward / backward / generation pipeline is fully functional**, with no structural blockers.
+2. All issues surfaced by evaluation (repetition, off-topic responses, multi-turn collapse) are attributable to **insufficient training data + insufficient training steps + data-quality contamination** — i.e. **underfitting**, not architectural error.
+3. Knowledge-graph injection at inference time is **ineffective or even harmful**. The correct usage is to convert triples into training corpus rather than perform inference-time RAG.
+
+---
+
+## 2. Hardware & Training Constraints
+
+The project uses a split environment: **training in the cloud, testing and patching locally**.
+
+### 2.1 Training Environment (ModelScope Cloud)
+
+| Resource | Specification |
 |---|---|
-| GPU | 24GB 显存 |
-| CPU | 8 核 |
-| 内存 | 32GB |
-| 单次任务时长上限 | 10 小时（断点续训精确到 batch，可续跑） |
+| GPU | 24 GB VRAM |
+| CPU | 8 cores |
+| RAM | 32 GB |
+| Single-task time cap | 10 hours (checkpoint-and-resume granularity down to the batch) |
 
-24GB 显存下 300m 档（batch=4, seq=128，含优化器状态）实测无压力：
+At 24 GB VRAM, the 300m tier (batch=4, seq=128, including optimizer state) runs without pressure:
 
-| 预设 | 参数量 | 优化器 | 峰值显存 |
+| Preset | Parameters | Optimizer | Peak VRAM |
 |---|---|---|---|
-| 100m | 88.2M | AdamW | 1.67 GB |
-| 300m | 187.6M | AdamW | 3.49 GB |
-| 300m | 187.6M | Adafactor | 2.24 GB |
-| 1b | ~1.1B | Adafactor | 24GB 内可跑 |
+| `100m` | 88.2 M | AdamW | 1.67 GB |
+| `300m` | 187.6 M | AdamW | 3.49 GB |
+| `300m` | 187.6 M | Adafactor | 2.24 GB |
+| `1b` | ~1.1 B | Adafactor | fits within 24 GB |
 
-单次 10 小时上限靠 `--resume` 断点续训衔接：checkpoint 每 500 步原子存档，
-续训 lr 按绝对步数衔接不跳变。本报告全部 checkpoint（step5000/11500/13000）
-均由魔塔云端训练产出。
+The 10-hour single-task cap is bridged via `--resume` checkpoint continuation: checkpoints are atomically archived every 500 steps, and the learning rate is rejoined at the absolute step count with no jump. All checkpoints referenced in this report (step 5000 / 11500 / 13000) were produced on the ModelScope cloud.
 
-### 2.2 测试/修复环境（本地）
+### 2.2 Test / Patch Environment (Local)
 
-| 资源 | 规格 |
+| Resource | Specification |
 |---|---|
-| GPU | RTX 3050 Laptop，4GB VRAM |
-| 内存 | 受 OS 限制 |
+| GPU | RTX 3050 Laptop, 4 GB VRAM |
+| RAM | OS-limited |
 
-本地只做推理评测与代码修复，4GB 显存足够加载 300m 档做生成测试；
-训练不在本地进行。**约束结论**：评测结论全部基于 300m 档。
+Locally we only run inference evaluation and code patching — 4 GB is sufficient to load the 300m tier for generation tests. **No training runs locally.** Constraint takeaway: every evaluation conclusion in this report is based on the 300m tier.
 
 ---
 
-## 3. 数据规模与配比（欠拟合的第一证据）
+## 3. Data Scale & Parameter/Token Ratio
 
-本地语料实测（`datasets/03_dialogue_clean`，60 个 jsonl）：
+The first piece of evidence for underfitting. Measured on the local corpus (`datasets/03_dialogue_clean`, 60 jsonl files):
 
-| 指标 | 值 |
+| Metric | Value |
 |---|---|
-| 样本条数 | 237,707 |
-| 总 token（max_seq_len=128） | 28.47M |
-| 平均样本长度 | 105.8 token |
-| 长度分布 | p50=106 / p90=181 / p99=282 / max=2952 |
-| 截断在 128 的样本 | **81.4%** |
-| 512 下完整保留 | 97.0% |
+| Sample count | 237,707 |
+| Total tokens (`max_seq_len=128`) | 28.47 M |
+| Average sample length | 105.8 tokens |
+| Length distribution | p50 = 106 / p90 = 181 / p99 = 282 / max = 2952 |
+| Samples truncated at 128 | **81.4%** |
+| Fully retained at 512 | 97.0% |
 
-参数/token 配比（Chinchilla 参考 20 token/参数）：
+Parameter/token ratio (Chinchilla reference: 20 tokens/parameter):
 
-| 预设 | 参数量 | 建议 token | 本地 28.5M 覆盖率 | 缺口 |
+| Preset | Parameters | Recommended tokens | Local 28.5 M coverage | Shortfall |
 |---|---|---|---|---|
-| small | 16M | 0.32B | 8.9% | 11× |
-| 100m | 90M | 1.81B | 1.6% | 64× |
-| **300m** | **210M** | **4.20B** | **0.7%** | **147×** |
-| 1b | 1.1B | 22.0B | 0.13% | 772× |
+| `small` | 16 M | 0.32 B | 8.9% | 11× |
+| `100m` | 90 M | 1.81 B | 1.6% | 64× |
+| **`300m`** | **210 M** | **4.20 B** | **0.7%** | **147×** |
+| `1b` | 1.1 B | 22.0 B | 0.13% | 772× |
 
-**这是全报告最重要的一张表**：300m 模型只喂了建议量的 1/147。
-且 81.4% 的样本被截断在 128 token——**模型主要只见过对话的"开头"**，
-这是"开口像话、越说越离谱"的直接来源。
+**This is the single most important table in the report**: the 300m model was fed only 1/147 of the recommended token budget. Furthermore, 81.4% of samples were truncated at 128 tokens — **the model has predominantly only seen the "beginnings" of dialogues**. This is the direct cause of the "starts off sounding like a conversation, then drifts off" behavior.
 
 ---
 
-## 4. 评估指标（step5000 checkpoint）
+## 4. Evaluation Metrics (step 5000 checkpoint)
 
-`eval_metrics.json` 实测（300m, n_blocks=16, d_field=1024, max_seq_len=128）：
+Measured on `eval_metrics.json` (300m, n_blocks=16, d_field=1024, max_seq_len=128):
 
-| 指标 | 值 | 说明 |
+| Metric | Value | Note |
 |---|---|---|
-| CE | 2.1783 | 随机基线 9.01 → 说明在学 |
-| PPL | 8.83 | |
-| p_eom_mean | 0.484 | 学会了在 MOSS 末尾收尾 |
-| gen_eom_fired | 5/5（你好呀）, 5/5（我好累啊） | 模板完整 |
-| gen_len_range | 36–42 token | 长度合理 |
-| 序参量 r_first / r_last | 0.406 / 0.545 | 无坍缩 |
-| entropy s_first / s_last | 2.75 / 4.635 | 无信息塌缩 |
+| CE | 2.1783 | Random baseline is 9.01 → the model is learning |
+| PPL | 8.83 | — |
+| `p_eom_mean` | 0.484 | Learned to close at MOSS-style end markers |
+| `gen_eom_fired` | 5/5 ("你好呀"), 5/5 ("我好累啊") | Template completeness |
+| `gen_len_range` | 36–42 tokens | Reasonable length |
+| Order parameter `r_first` / `r_last` | 0.406 / 0.545 | No collapse |
+| Entropy `s_first` / `s_last` | 2.75 / 4.635 | No information collapse |
 
-**指标显示：模型学会了对话模板（Human→MOSS→EOM），且没有物理坍缩。**
-但生成内容质量差（见 §5），说明模板与语义是两回事——模板来自格式学习，
-语义需要足够的 token 量。
+**The metrics show: the model has learned the dialogue template (Human → MOSS → EOM) and there is no physical collapse.** However, generation content quality is poor (see §5), which means template and semantics are two different things — the template comes from format learning, while semantics requires sufficient token volume.
 
 ---
 
-## 5. 测试方向与结果
+## 5. Test Directions & Results
 
-全部测试遵循**严格对照**原则：同一输入、同一采样参数、同一设备，
-只在单一变量上做比较，保证结论可归因。
+All tests follow a **strict controlled-comparison** protocol: same input, same sampling parameters, same device, with only a single variable changed per comparison — ensuring conclusions are attributable.
 
-### 5.1 单轮对话：5000 vs 11500 vs 13000
+### 5.1 Single-Turn Dialogue: step 5000 vs 11500 vs 13000
 
-采样参数固定：`temp=0.8, top_k=50, top_p=0.9, rep_penalty=1.15, no_repeat_ngram=4`。
+Sampling parameters fixed: `temp=0.8, top_k=50, top_p=0.9, rep_penalty=1.15, no_repeat_ngram=4`.
 
-| 问题 | step5000 | step11500 | step13000(SFT) |
+| Prompt | step 5000 | step 11500 | step 13000 (SFT) |
 |---|---|---|---|
-| 你好啊 | 混乱 | "哇哇哇~你个好哇哇哇哇⭐但我了你好哇哇喵！" | "怎么怎么啊 : 这只说的是怎么会怎么可能…" |
-| 我好累啊 | "去睡觉"（偶发匹配） | "不要把你的时间表分心放在你要去完成你做的"、"快去睡觉" | "想怎么做很多事情，怎么做些什么呢？去做好像我才做到…" |
-| 你会什么 | 混乱 | "电脑上/手机上"等具体名词（部分匹配） | 仍乱 |
+| "你好啊" (Hello) | Chaotic | "哇哇哇~你个好哇哇哇哇⭐但我了你好哇哇喵！" | "怎么怎么啊 : 这只说的是怎么会怎么可能…" |
+| "我好累啊" (I'm so tired) | "去睡觉" (Go to sleep) — sporadic match | "不要把你的时间表分心放在你要去完成你做的" / "快去睡觉" | "想怎么做很多事情，怎么做些什么呢？去做好像我才做到…" |
+| "你会什么" (What can you do) | Chaotic | "电脑上/手机上" (On the computer / phone) — partial match | Still chaotic |
 
-**结论：**
-- 5000→11500：从偶发匹配到**稳定匹配**（"我好累啊"两次都答对安慰语义）——训练在进步；
-- 11500→13000（SFT 1500 步）：从"碎词循环（哇哇喵）"变成"动词短语循环（怎么怎么/想怎么做）"——
-  **SFT 换了一套复读材料，但没有消灭复读机制**；
-- 13000 反而"更差"的两个配置原因（checkpoint 元数据实锤）：
-  1. SFT 阶段 `w_fm=0.1, w_sync=0.1, w_drift=0.05, w_free=0.05` **辅助物理损失全开**，
-     而它们本应在纯问答阶段退场；
-  2. `warmup_steps=19500` 但实际只训到 13000 → **全程在 warmup 期，lr 从未到达峰值**，
-     SFT 是"用预热力度微调"，学得很浅。
+**Conclusions**:
 
-### 5.2 多轮对话：格式是分水岭
+- **5000 → 11500**: from sporadic match to **stable match** ("我好累啊" answered with the right consolation semantics twice in a row) — training is progressing.
+- **11500 → 13000** (SFT 1500 steps): from "word-fragment loops (哇哇喵)" to "verb-phrase loops (怎么怎么 / 想怎么做)" — **SFT swapped one repetition substrate for another, but did not eliminate the repetition mechanism**.
+- The two reasons why step 13000 actually performed *worse* (confirmed by checkpoint metadata):
+  1. The SFT stage ran with `w_fm=0.1, w_sync=0.1, w_drift=0.05, w_free=0.05` — **all auxiliary physics losses fully on**, when they should have been retired during the pure-QA phase.
+  2. `warmup_steps=19500` but actual training stopped at 13000 → **the entire run was inside the warmup window, lr never reached its peak**. SFT was effectively "fine-tuning at warmup intensity" — learning was very shallow.
 
-- **错误格式**（轮间插入 `<s>` 分隔符）：模型输出 "⭐⭐⭐ Counting'mem" 等 emoji/英文碎片，
-  完全没接续主题 → **最初误判为"多轮没学到"**；
-- **正确格式**（与 SFT 训练完全一致：轮间纯换行、无 `<s>`，见 `convert_sft.py`）：
-  `猫娘是什么？→ 女孩子会怎么样呢？`——**模型正确关联了跨轮主题**；
-- **真实多轮聊天**（历史累积）：第一轮的垃圾输出（"怎么怎么怎么"）被存进历史作为上下文，
-  后续每一轮都被带偏 → **多轮放大了弱点，而不是隐藏弱点**。
+### 5.2 Multi-Turn Dialogue: Format Is the Watershed
 
-**教训（方法论）**：第一次多轮测试用了自己手拼的错误格式，得出"多轮没学到"的错误结论。
-修正为与训练一致的格式后结论反转。**评测格式必须与训练格式严格一致**，否则测的是格式不是模型。
+- **Wrong format** (inserting `<s>` between turns): the model output emoji/English fragments like "⭐⭐⭐ Counting'mem" with no topic continuity → **initially misjudged as "multi-turn not learned"**.
+- **Correct format** (matching SFT training exactly: plain newline between turns, no `<s>`, see `convert_sft.py`): `猫娘是什么？ → 女孩子会怎么样呢？` — **the model correctly associated the topic across turns**.
+- **Real multi-turn chat** (accumulated history): garbage from turn 1 ("怎么怎么怎么") was stored in history as context, and every subsequent turn was dragged off-course → **multi-turn amplifies weaknesses rather than hiding them**.
 
-### 5.3 知识图谱注入：推理期注入无效（最重要的负结果）
+**Methodological lesson**: the first multi-turn test used a hand-cobbled wrong format and produced the false conclusion "multi-turn not learned". After correcting the format to match training, the conclusion reversed. **Evaluation format must strictly match training format — otherwise you are testing the format, not the model.**
 
-知识图谱：`knowledge_graph.json`，9948 实体 + 8011 三元组（`[主语, 关系, 宾语]`）。
+### 5.3 Knowledge-Graph Injection: Inference-Time Injection Is Ineffective (the Most Important Negative Result)
 
-三种注入方式 × 三个 checkpoint，全部做**注入 vs 无注入**对照：
+Knowledge graph: `knowledge_graph.json` — 9,948 entities + 8,011 triples (`[subject, relation, object]`).
 
-| 注入方式 | 结果 |
+Three injection methods × three checkpoints, each with an **injected vs not-injected** control:
+
+| Injection method | Result |
 |---|---|
-| RAG 引导式（"根据以下知识回答：…问题：…"） | 三个 ckpt 全部变差，13000 彻底崩坏（英文乱码） |
-| 自然融入式（"关于这个问题，我了解到：…请问…"） | 仍变差（"技术？"、"巴哈德！"） |
-| **无注入（对照）** | 反而更好："是一种常用的网络协议"、"5G网络的使用场景" |
+| RAG-guided ("Answer based on the following knowledge: … Question: …") | All three checkpoints degraded; step 13000 collapsed completely (English gibberish) |
+| Natural-fluency ("Regarding this question, I learned that: … May I ask…") | Still degraded ("技术？", "巴哈德！") |
+| **No injection (control)** | Actually better: "是一种常用的网络协议", "5G网络的使用场景" |
 
-**根因（三条）：**
-1. **窗口挤占**：max_seq_len=128 下注入知识占 30+ token，模型的续写启动空间被稀释，
-   只能吐出极短残句；
-2. **句式不存在于训练分布**：RAG 引导语模型从未见过，带偏续写路径；13000（SFT 过）
-   对非训练句式最敏感 → 崩得最彻底；
-3. **三元组噪声**：即使过滤后仍有 `技术 (COMES_FROM) 动处理一些常见问题` 这类无意义注入。
+**Root causes (three)**:
 
-**结论**：知识图谱推理期注入适合**训练好的大模型**（RAG），不适合欠拟合小模型——
-小模型消化不了外部知识格式。正确用法是把三元组转成自然句
-（"5G是一种可以在工业领域应用的技术"）**混入训练语料**，让模型把知识学进权重。
-（脚本 `scripts/kg_chat.py` 已保留，含实体匹配与噪声过滤，供后续作为训练数据生成器复用。）
+1. **Window crowding**: at `max_seq_len=128`, injected knowledge occupies 30+ tokens, diluting the model's continuation-start space — it can only emit very short residual fragments.
+2. **Sentence pattern out-of-distribution**: the RAG prompt template was never seen in training, biasing the continuation path; step 13000 (post-SFT) is most sensitive to non-training patterns → collapses hardest.
+3. **Triple noise**: even after filtering, meaningless injections like `技术 (COMES_FROM) 动处理一些常见问题` remain.
 
-### 5.4 采样参数：能缓解复读，不能根治
+**Conclusion**: inference-time knowledge-graph injection suits **well-trained large models** (RAG), not underfit small models — a small model cannot digest the external-knowledge format. The correct usage is to convert triples into natural sentences ("5G is a technology that can be applied in industrial fields") and **mix them into the training corpus**, letting the model absorb the knowledge into its weights. (The script `scripts/kg_chat.py` is retained, including entity matching and noise filtering, for reuse as a training-data generator going forward.)
 
-强惩罚（`temp 0.6 + rep 1.3 + ngram 4`）下复读依然存在（"哇哇哇哇"、"快快快快"）。
-复读根因是欠拟合形成的高概率环——模型对几个高频词过度置信，参数只能压不能消。
-**根治复读只能靠把模型训好，没有采样捷径。**
+### 5.4 Sampling Parameters: Can Mitigate Repetition, Not Cure It
 
-### 5.5 空输出 / 提前终止（工程侧修复）
+Under heavy penalties (`temp 0.6 + rep 1.3 + ngram 4`), repetition persists ("哇哇哇哇", "快快快快"). The root cause of repetition is a high-probability loop formed by underfitting — the model is over-confident on a few high-frequency tokens, and parameters can only suppress, not eliminate. **Curing repetition requires actually training the model well — there is no sampling shortcut.**
 
-- 现象：历史被高频重复 token 占满后，`rep_penalty + no_repeat_ngram` 把所有候选压下去，
-  模型直接生成 `<eom>`（空回复）；
-- 修复（chat.py）：生成首 token 为 `<eom>` 时自动放宽参数重试一次；历史只保留最近 3 轮，
-  防止早期垃圾无限污染后续。
+### 5.5 Empty Output / Premature Termination (Engineering-Side Fix)
+
+- **Symptom**: when history is filled with high-frequency repeated tokens, `rep_penalty + no_repeat_ngram` suppresses every candidate, and the model emits `<eom>` directly (empty reply).
+- **Fix (in `chat.py`)**: when the first generated token is `<eom>`, automatically relax parameters and retry once; history keeps only the most recent 3 turns to prevent early garbage from indefinitely contaminating later turns.
 
 ---
 
-## 6. 架构级评估（代码审查 + 实测）
+## 6. Architecture-Level Assessment
 
-### 6.1 架构可用性
+### 6.1 Architecture Usability
 
-前向/反向/生成/流匹配全部通过 smoke test；20 万条数据 memmap 管线无内存崩溃；
-checkpoint 原子化 + 断点续训到 batch 级。**工程实现层面无阻断问题。**
+Forward, backward, generation, and flow-matching all pass the smoke test; the 200k-sample memmap pipeline runs without memory crashes; checkpoints are atomic and resume is batch-level precise. **At the engineering-implementation level, there are no blocking issues.**
 
-### 6.2 发现的问题（按严重程度）
+### 6.2 Issues Found (Ranked by Severity)
 
-**P1. 驻波位置编码依赖当前序列长度**（`physics.py:_standing_wave`）
-`k = 2π(m+1)/N` 中波数被当前长度 N 归一化。训练时 N 恒定，但**自回归推理时
-N 每步 +1，全窗所有位置的编码每一步都在变**——已生成前缀的表示不"冻结"，
-破坏了自回归稳定性的前提。修复方向：波数改绝对频率（`k = 2π(m+1)/L_max` 固定）。
+**P1. Standing-wave positional encoding depends on the current sequence length** (`physics.py:_standing_wave`)
 
-**P2. 辅助物理损失与语言目标冲突**
-- `L_fm` 目标 `v = x1 − x0` 中 x0 是纯噪声，**没有语言信号**（训练日志 loss_fm≈1.5 全程不降）；
-- `L_sync` 目标 r=0.966 逼"全局同步"，与语言需要的"局部多样性"天然矛盾；
-- `L_drift` 吸引中心是随机初始化的原型（`randn*0.05`），无锚点到真实嵌入，等于注入随机力。
+The wavenumber `k = 2π(m+1)/N` is normalized by the current length N. During training N is constant, but **during autoregressive inference N grows by +1 each step, so the encoding at every position in the window changes every step** — the representation of the already-generated prefix is not "frozen", which breaks the precondition for autoregressive stability.
 
-**P3. 词表 8192 对中文太小**
-中文常用字 3500+，8192 BPE 对中文基本退化到单字/双字级，模型只能背 n-gram 碎片。
-对话里的 `�` 一半是罕见字符被拆字节无法完整解码。
+**Fix direction**: switch the wavenumber to an absolute frequency (`k = 2π(m+1)/L_max`, fixed).
 
-**P4. 振幅信息利用率低**
-日志熵 S≈6.4 vs 理论最大 ln(1024)=6.93——振幅分布近均匀，输出全靠相位，
-16 轮混沌积分后精确 token 预测难学。
+**P2. Auxiliary physics losses conflict with the language objective**
 
-### 6.3 数据质量污染（意外发现）
+- `L_fm`'s target `v = x1 − x0` uses x0 = pure noise, **which carries no language signal** (training log shows `loss_fm ≈ 1.5` flat, never decreasing);
+- `L_sync`'s target `r = 0.966` forces "global synchrony", which is inherently at odds with the "local diversity" that language modeling requires;
+- `L_drift`'s attraction centers are randomly initialized prototypes (`randn * 0.05`) with no anchor to real embeddings — effectively injecting random forces.
 
-生成输出中出现 `<sup><|1|></sup>`（HTML 标签）、`qwqwq`、`喵！`、`（恼）`、
-`Counting'mem` 等碎片——**语料混入了 HTML 与网络表情符噪声**，模型在背这些碎片。
-这也是欠拟合的一部分（数据质量本身低），且是可行动项。
+**P3. Vocabulary size 8192 is too small for Chinese**
+
+Chinese has 3,500+ common characters; with 8192 BPE tokens, Chinese effectively degenerates to single/double-character units, and the model can only memorize n-gram fragments. Half of the `�` characters in generated outputs are rare characters that were byte-split and could not be decoded completely.
+
+**P4. Amplitude information is underutilized**
+
+Logs show entropy `S ≈ 6.4` vs the theoretical maximum `ln(1024) = 6.93` — the amplitude distribution is near-uniform, output relies almost entirely on phase, and precise token prediction becomes hard to learn after 16 rounds of chaotic integration.
+
+### 6.3 Data-Quality Contamination (Unexpected Finding)
+
+Generation outputs contain fragments like `<sup><|1|></sup>` (HTML tags), `qwqwq`, `喵！`, `（恼）`, `Counting'mem` — **the corpus is contaminated with HTML and emoji/internet-slang noise, and the model is memorizing these fragments**. This is part of the underfitting picture (data quality itself is low) and is an actionable item.
 
 ---
 
-## 7. 归因总结
+## 7. Attribution Summary
 
-| 现象 | 归因 | 证据 |
+| Symptom | Attribution | Evidence |
 |---|---|---|
-| 复读/乱码 | 欠拟合（数据量 + 步数不足） | 147× 缺口；5000→11500 稳定进步 |
-| 答非所问 | 欠拟合 + 81.4% 样本截断（没见过完整逻辑） | len_pct / truncated_at_128 |
-| 13000 比 11500 差 | SFT 未训完 + 辅助损失全开 + warmup 未完成 | checkpoint 元数据 |
-| 多轮崩坏 | 多轮放大弱点；第一轮垃圾污染历史 | 5.2 对照 |
-| 知识注入无效 | 窗口挤占 + 句式不在训练分布 + 三元组噪声 | 5.3 对照 |
-| 位置编码漂移 | 架构缺陷（P1） | 代码审查 |
-| 参数/数据配比失衡 | 数据量硬约束 | §3 表格 |
+| Repetition / gibberish | Underfitting (data volume + step count) | 147× shortfall; stable 5000→11500 progress |
+| Off-topic answers | Underfitting + 81.4% sample truncation (never saw complete logic) | `len_pct` / `truncated_at_128` |
+| step 13000 worse than 11500 | SFT not completed + auxiliary losses fully on + warmup incomplete | Checkpoint metadata |
+| Multi-turn collapse | Multi-turn amplifies weaknesses; turn-1 garbage contaminates history | §5.2 control |
+| KG injection ineffective | Window crowding + out-of-distribution template + triple noise | §5.3 control |
+| Positional encoding drift | Architectural defect (P1) | Code review |
+| Parameter/data ratio imbalance | Hard data-volume constraint | §3 table |
 
-**一句话**：模型会学对话模板、会跨轮抓主题、能区分意图类型——这些是**结构层已经学会了**的；
-它不会的是**知识组织与逻辑展开**——那是**量变（数据/步数）才能带来的质变**。
-
----
-
-## 8. 后续方向（按性价比排序）
-
-1. **数据清洗**：过滤含 HTML 标签、纯表情符样本（一次性正则，简单）；
-2. **加长序列**：`--max_seq_len 256→512`（97% 样本完整保留，当前 128 只留 19%）；
-3. **续训**：直接在现有 checkpoint 上续（`--resume`），不重训、不新增存储；
-   云端 24GB 下 300m 用 AdamW 即可，或 Adafactor（2.24GB）进一步省显存；
-4. **修复 P1 位置编码**：纯架构修复，消除自回归表示漂移；
-5. **SFT 规范化**：SFT 阶段关闭辅助物理损失、训完 warmup、训满步数；
-6. **知识图谱转训练语料**：8011 条三元组 → 自然句 → 混入训练集。
+**In one sentence**: the model *has* learned the dialogue template, *can* track topics across turns, and *can* distinguish intent types — these are **structural-level capabilities already acquired**. What it cannot do is **knowledge organization and logical elaboration** — that is a **qualitative change that only quantitative scaling (data/steps) can bring**.
 
 ---
 
-## 9. 测试/复现入口
+## 8. Recommended Next Steps (Ranked by ROI)
 
-| 工具 | 用途 |
+1. **Data cleaning**: filter samples containing HTML tags or pure emoji (a one-shot regex pass — simple).
+2. **Lengthen sequences**: `--max_seq_len 256 → 512` (97% of samples fully retained; the current 128 retains only 19%).
+3. **Continue training**: directly resume from existing checkpoints (`--resume`) — no retraining, no new storage. On 24 GB cloud, 300m with AdamW is fine; Adafactor (2.24 GB) saves further.
+4. **Fix P1 positional encoding**: pure architectural fix; eliminates autoregressive representation drift.
+5. **Normalize SFT**: during the SFT stage, turn off auxiliary physics losses, complete the warmup, and train to the full step count.
+6. **Convert knowledge graph to training corpus**: 8,011 triples → natural sentences → mix into the training set.
+
+---
+
+## 9. Reproducibility Entry Points
+
+| Tool | Purpose |
 |---|---|
-| `generate.py` | 单轮生成（严格对照用） |
-| `chat.py` | 多轮对话（含空回复重试 + 历史截短） |
-| `scripts/kg_chat.py` | 知识图谱注入对照实验 |
-| `eval_metrics.json` | 指标评估（CE/PPL/序参量/熵） |
-| `logs/train_log.tsv` | 训练曲线 |
-| `smoke_test.py` | 前向/反向/生成冒烟 |
+| `generate.py` | Single-turn generation (for strict controlled comparison) |
+| `chat.py` | Multi-turn dialogue (with empty-reply retry + history truncation) |
+| `scripts/kg_chat.py` | Knowledge-graph injection controlled experiment |
+| `eval_metrics.json` | Metric evaluation (CE / PPL / order parameter / entropy) |
+| `logs/train_log.tsv` | Training curves |
+| `smoke_test.py` | Forward / backward / generation smoke test |
 
 ---
 
-## 10. 许可与开源
+## 10. License & Open-Source Statement
 
-本项目开源。评测脚本、对照方法、全部结论数据均随仓库发布，可复现。
-欢迎基于 §8 的后续方向贡献数据清洗与架构修复。
+This project is open-sourced. Evaluation scripts, controlled-comparison methodology, and all conclusion data are released alongside the repository and are reproducible. Contributions on data cleaning and architecture fixes based on §8 are welcome.
