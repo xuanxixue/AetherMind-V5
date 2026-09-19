@@ -122,7 +122,7 @@ PMNN 物理核心由 R 轮物理块堆叠构成，每轮包含四层，与 Trans
 
 **导航总线**：时间场 × 热力学 → K 值（耦合强度 κ(t) · 温度退火 T(t) · 驱动频率 ω_d(t) · 熵预算），双向馈送——总线控制物理块，物理块反馈序参量。
 
-> 📐 **完整设计稿** 见 `docx/PMNN物理矩阵神经网络通用底层架构.md`（v0.1 正式稿），包含六扩展（ELF / 漂移场 / UN-0 相位 / 热力学熵 / 共振驻波 / 时间物理）合流的统一状态方程、来源核验记录与风险诚实标注。
+> 📐 **完整设计稿** 见 [`PMNN_模型架构详尽网络层通用底层架构 (1).md`](./PMNN_模型架构详尽网络层通用底层架构%20%281%29.md)（v0.1 正式稿），包含六扩展（ELF / 漂移场 / UN-0 相位 / 热力学熵 / 共振驻波 / 时间物理）合流的统一状态方程、来源核验记录与风险诚实标注。
 
 **统一状态方程**（六扩展合流的核心矩阵公式）：
 
@@ -282,22 +282,45 @@ $PY plot_train.py
 
 ## 七、目录结构与路径规范
 
+> 📌 本仓库采用**扁平根目录结构**：所有 Python 源码、脚本、文档均直接放在仓库根目录下，仅图片资源收纳于 `docs/images/` 子目录。这样 GitHub 首页可直接浏览全部代码，无需逐层点入。
+
 ```
-D:\AetherMind-V5\                          ← 工作区根目录
-├── AetherMind-V5\
-│   └── pmnn_text\                         ← 本工程（代码只放这里，不与 docx/datasets 混放）
-│       ├── paths.py                       路径解析层（CLI > 环境变量 > 自动探测）
-│       ├── config.py                      超参 + 规模预设
-│       ├── data_utils.py                  词表 + memmap 数据集
-│       ├── prepare_data.py                预处理：jsonl → tokens.bin
-│       ├── train.py                       训练
-│       ├── generate.py                    生成
-│       ├── plot_train.py                  曲线可视化
-│       ├── smoke_test.py                  冒烟测试（不读数据）
-│       └── scripts\                       启动脚本（.bat 纯 ASCII / .sh）
-├── datasets\                              数据区
-└── docx\                                  文档区
+AetherMind-V5/                            ← GitHub 仓库根
+├── README.md                             ← 本文件（中文版主入口）
+├── README_CN.md                          ← 中文 README 副本（旧版，待清理）
+├── PMNN README.md                        ← PMNN 项目说明（英文版要点）
+├── TECH_REPORT.md                        ← 技术报告
+├── CLOUD_GUIDE.md                        ← 云端部署指南（KD 上云包第 1~9 步）
+├── PMNN_模型架构详尽网络层通用底层架构 (1).md   ← ⭐ v0.1 设计稿正式稿（点击查看）
+├── PMNN_Architecture_Design_v0.1_…       ← 设计稿英文版
+├── LICENSE                               ← CC_BY_4.0
+├── requirements.txt                      ← Python 依赖清单
+│
+├── paths.py                              ← 路径解析层（CLI > 环境变量 > 自动探测）
+├── config.py                             ← 超参 + 规模预设
+├── data_utils.py                         ← 词表 + memmap 数据集
+├── prepare_data.py                       ← 预处理：jsonl → tokens.bin
+├── train.py                              ← 训练入口
+├── generate.py                           ← 推理 / 生成
+├── plot_train.py                         ← 训练曲线可视化
+├── smoke_test.py                         ← 冒烟测试（不读数据）
+├── chat.py                               ← 交互式对话 demo
+├── convert_sft.py                        ← SFT 数据格式转换
+├── diagnose.py                           ← 物理 / 训练诊断脚本
+├── _env_check.py                         ← 环境自检
+├── _memtest.jsonl                        ← 内存测试样本
+│
+└── docs/
+    └── images/                           ← README 引用的所有配图
+        ├── fig_arch_ablation.png         ← 图 1 · 受控架构消融
+        ├── fig_bpb_benchmark.png         ← 图 2 · 跨架构 BPB 基准
+        ├── fig_scaling_law.png           ← 图 3 · 参数缩放律
+        ├── fig_physics_step5000.png      ← 图 4 · step 5000 逐层物理轨迹
+        ├── fig_physics_step11500.png     ← 图 5 · step 11500 无坍缩验证
+        └── fig_seqlen_intact.png         ← 图 6 · 序列长度敏感性
 ```
+
+> 💡 **设计稿阅读入口**：仓库根目录的 [`PMNN_模型架构详尽网络层通用底层架构 (1).md`](./PMNN_模型架构详尽网络层通用底层架构%20%281%29.md) 是 v0.1 正式稿，GitHub 网页上点击文件名即可直接渲染预览（含公式、表格、ASCII 图）。
 
 **路径参数化**：所有脚本路径走三级解析（CLI > 环境变量 > 自动探测），云端零改代码。
 
@@ -569,7 +592,7 @@ L = L_ce + w_fm·L_fm + w_sync·L_sync + w_drift·L_drift + w_free·L_F
 
 ## 十三、设计稿落实情况
 
-以 `docx/PMNN物理矩阵神经网络通用底层架构.md` 为准，逐条核对实现状态。❌ 项都已用 grep 验证过确实未接入（不是"可能没实现"）。
+以 [`PMNN_模型架构详尽网络层通用底层架构 (1).md`](./PMNN_模型架构详尽网络层通用底层架构%20%281%29.md)（即原 `docx/PMNN物理矩阵神经网络通用底层架构.md`，已迁入仓库根目录）为准，逐条核对实现状态。❌ 项都已用 grep 验证过确实未接入（不是"可能没实现"）。
 
 | 设计稿条目 | 状态 | 说明 |
 |---|---|---|
@@ -622,7 +645,7 @@ L = L_ce + w_fm·L_fm + w_sync·L_sync + w_drift·L_drift + w_free·L_F
 
 ### 为什么"架构完全不同也能蒸馏"
 
-详见 `docx/PMNN_蒸馏方案_MiniCPM5教师.md` 第一节。
+详见 `PMNN_蒸馏方案_MiniCPM5教师.md` 第一节（如有该文件；否则参考 `CLOUD_GUIDE.md` 第一节）。
 
 > **核心论点**：PMNN 内部 `KuramotoSync` 算出的 `w` 与 Transformer 注意力同构，所以注意力对齐不需要投影层。
 
